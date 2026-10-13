@@ -1,0 +1,8 @@
+Weekly engineering report - SHARD-7 cache
+
+Summary
+  The SHARD-7 cache rollout on 2026-01-05 is complete.
+  p95 latency is now 120ms.
+
+Sign-off
+  Release signed off by the release captain.

@@ -1,0 +1,9 @@
+Delivery note 412 - SHARD-7 cache
+
+Build
+  The SHARD-7 cache shipped on 2026-01-05.
+  Unit tests: 148 passed, 0 failed.
+
+Impact
+  p95 latency fell to 120ms.
+  Release signed off by the release captain.
