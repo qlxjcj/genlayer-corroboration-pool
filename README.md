@@ -182,6 +182,52 @@ python -m pytest tests/direct -q        # 47 passed
 
 ---
 
+## Live on chain
+
+Two evidence documents are served from **genuinely different hosts** — one from
+`raw.githubusercontent.com`, one from an independent gist — which is exactly
+what the contract tests for. Three claims were filed, each resting on a
+different pair of hosts, all naming the anchor `SHARD-7`:
+
+| claim | host pair |
+|---|---|
+| c1 | `raw.githubusercontent.com` + `gist.githubusercontent.com` |
+| c2 | `cdn.jsdelivr.net` + `gist.githubusercontent.com` |
+| c3 | `cdn.jsdelivr.net` + `raw.githubusercontent.com` |
+
+`open_pool` with 1 GEN, three `file_claim` calls, the freeze, three `assess`
+calls and one `allocate`:
+
+```
+status              SETTLED
+total               1000000000000000000
+corroborated_count  3
+share               333333333333333333
+remainder           1
+paid_total          999999999999999999
+
+share * n + remainder     = 1000000000000000000 == total
+paid_total + remainder    = 1000000000000000000 == total
+remainder == total - share*n
+0 <= remainder < n
+
+c1  CORROBORATED | same=true | shared="SHARD-7 cache"
+c2  CORROBORATED | same=true | shared="SHARD-7 cache"
+c3  CORROBORATED | same=true | shared="SHARD-7 cache"
+```
+
+The indivisible remainder — **one atto** — went to the funder, which is the
+whole reason the arithmetic is written the way it is. Every claim's shared span
+was copied character for character out of the two documents the contract
+fetched; compare it against `fixtures/` and the gist and see that a model could
+not have invented it.
+
+Check it yourself with `genlayer call <address> get_pool '"p0"'`. Note that
+`10^18 // 3` is not exactly representable as a JavaScript `Number`, so read the
+raw JSON string and compare with `BigInt`, not with `JSON.parse`.
+
+---
+
 ## Source integrity
 
 Deployed and repository source are byte identical:
