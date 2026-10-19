@@ -12,6 +12,9 @@ three lessons it is built around:
   F  allocation and funds     -- every unit reaches exactly one address
   G  uniform write preconditions -- every refusal leaves the state untouched
   H  views                    -- no float or list ever leaves the contract
+  I  adversarial filing       -- the question and the venues belong to the
+                                 funder, and no single account can occupy the
+                                 pool by itself
 """
 
 import json
@@ -21,12 +24,15 @@ import pytest
 from conftest import (
     ANCHOR,
     ANCHOR_OTHER,
+    ANCHOR_THIRD,
+    ANCHORS,
     BAD_ADDR,
     BRIEF,
     CLAIMANT_A,
     CLAIMANT_B,
     CLAIMANT_C,
     FUNDER,
+    HOSTS,
     POOL,
     STRANGER,
     URL_ALPHA,
@@ -40,6 +46,7 @@ from conftest import (
     URL_EMPTY,
     URL_ERROR,
     URL_FTP,
+    URL_UNTRUSTED,
     URL_WRAP,
     allocate,
     ans,
@@ -221,17 +228,26 @@ def test_a_withdrawn_claim_frees_its_host_pair(pool):
 
 
 def test_rejects_when_the_pool_is_full(pool):
+    """The cap bounds the pool, and reaching it is no longer free for a single
+    account: a claimant may hold only one claim per anchor, so occupying the
+    twelve slots takes twelve distinct (account, anchor) combinations rather
+    than twelve calls from one address."""
     vm, c = pool
     pid = open_pool(vm, c)
-    hosts = ["h%d.example.com" % i for i in range(30)]
-    urls = ["https://" + h + "/doc" for h in hosts]
+    urls = ["https://" + h + "/doc" for h in HOSTS]
+    pairs = [pair(urls[i], urls[j])
+             for i in range(len(HOSTS)) for j in range(i + 1, len(HOSTS))]
+    assert len(pairs) >= 13
+    claimants = ["0x" + "%02x" % (0x50 + k) * 20 for k in range(5)]
+    for who in claimants:
+        vm.deal(who, 1000 * POOL)
     for i in range(12):
-        vm.mock_web(".*h" + str(i) + "\\.example\\.com.*",
-                    {"method": "GET", "status": 200, "body": "h%d doc" % i})
-        assert file_claim(vm, c, pid, "c%d" % i, ANCHOR,
-                          pair(urls[2 * i], urls[2 * i + 1]), 10) == "FILED"
+        assert file_claim(vm, c, pid, "c%d" % i, ANCHORS[i % 3], pairs[i], 10,
+                          sender=claimants[i % 4]) == "FILED"
     with pytest.raises(Exception):
-        file_claim(vm, c, pid, "c99", ANCHOR, pair(urls[0], urls[1]), 10)
+        # A fresh account, a fresh anchor and a fresh host pair: the cap is the
+        # only thing left that can refuse this.
+        file_claim(vm, c, pid, "c12", ANCHOR, pairs[12], 10, sender=claimants[4])
 
 
 # ==========================================================================
@@ -350,13 +366,26 @@ def test_a_shared_span_that_does_not_name_the_anchor_rejects(pool):
     assert assess(vm, c, pid, "c1", 200) == "REJECTED"
 
 
-def test_an_empty_anchor_never_passes(pool):
-    """The empty-string trap: '' is a substring of absolutely everything."""
+def test_a_blank_shared_span_never_passes(pool):
+    """The empty-string trap: '' is a substring of absolutely everything, so a
+    model that answers with an empty quote must not credit a claim."""
     vm, c = pool
     pid = open_pool(vm, c)
-    file_claim(vm, c, pid, "c1", "x", pair(URL_ALPHA, URL_BRAVO), 10)
+    file_claim(vm, c, pid, "c1", ANCHOR, pair(URL_ALPHA, URL_BRAVO), 10)
     remock(vm, llm=[(r".*alpha-report.*", ans("true", ""))])
     assert assess(vm, c, pid, "c1", 200) == "REJECTED"
+
+
+def test_a_blank_or_missing_anchor_is_refused_at_funding(pool):
+    """A whitespace anchor squashes to nothing and nothing is a substring of
+    everything, so it can never be a question worth funding -- and the funder
+    is the only one who may pose the question at all."""
+    vm, c = pool
+    for bad in ([], ["   "], ["SHARD-7", "  "]):
+        with pytest.raises(Exception):
+            open_pool(vm, c, anchors=bad)
+    with pytest.raises(Exception):
+        open_pool(vm, c, anchors="SHARD-7")
 
 
 def test_an_unreadable_source_rejects_the_claim(pool):
@@ -758,3 +787,104 @@ def test_get_pool_lists_every_claim_with_its_owner(pool):
         ("c1", "CORROBORATED", CLAIMANT_A),
         ("c2", "REJECTED", CLAIMANT_B),
     ]
+
+
+# ==========================================================================
+# I. adversarial filing -- the question and the venues belong to the funder
+# ==========================================================================
+
+
+def test_a_claimant_cannot_choose_the_question(pool):
+    """A claimant who picks its own anchor can name one its own two sites
+    already carry, and that is not corroboration of anything the funder asked
+    about. Only the funder's anchors are in play."""
+    vm, c = pool
+    pid = open_pool(vm, c)
+    for bad in ("MY-OWN-THING", "shard-8", "SHARD-7 extra", "", "   ", "x" * 121):
+        with pytest.raises(Exception):
+            file_claim(vm, c, pid, "c1", bad, pair(URL_ALPHA, URL_BRAVO), 10)
+        assert pool_state(vm, c, pid)["claims"] == []
+    # every anchor the funder did name is accepted, on its own host pair
+    for i, (anchor, srcs) in enumerate(zip(
+            ANCHORS,
+            (pair(URL_ALPHA, URL_BRAVO), pair(URL_CHARLIE, URL_DELTA),
+             pair(URL_WRAP, URL_EMPTY)))):
+        assert file_claim(vm, c, pid, "c%d" % i, anchor, srcs, 10,
+                          sender=[CLAIMANT_A, CLAIMANT_B, CLAIMANT_C][i]) == "FILED"
+
+
+def test_the_filed_anchor_is_the_funders_own_wording(pool):
+    """Two spellings of one anchor must not be able to become two claims: the
+    anchor is filed back in the funder's wording, not the claimant's."""
+    vm, c = pool
+    pid = open_pool(vm, c)
+    assert file_claim(vm, c, pid, "c1", "  shard-7  ",
+                      pair(URL_ALPHA, URL_BRAVO), 10) == "FILED"
+    assert claim_state(vm, c, pid, "c1")["anchor"] == ANCHOR
+    with pytest.raises(Exception):
+        # the same anchor under another spelling, on another host pair, is
+        # still the same claim from the same account
+        file_claim(vm, c, pid, "c2", "SHARD 7".replace(" ", "-"),
+                   pair(URL_CHARLIE, URL_DELTA), 10)
+
+
+def test_an_untrusted_venue_cannot_back_a_claim(pool):
+    """A claimant's own two sites agreeing with each other corroborate
+    nothing, so a host the funder never named cannot back a claim -- and a
+    refusal must not consume a slot."""
+    vm, c = pool
+    pid = open_pool(vm, c)
+    for srcs in (pair(URL_UNTRUSTED, URL_ALPHA),
+                 pair(URL_ALPHA, URL_UNTRUSTED),
+                 pair(URL_UNTRUSTED, URL_UNTRUSTED + "-2")):
+        with pytest.raises(Exception):
+            file_claim(vm, c, pid, "c1", ANCHOR, srcs, 10)
+        assert pool_state(vm, c, pid)["claims"] == []
+    # a trusted pair still works, so the refusal is about the venue alone
+    assert file_claim(vm, c, pid, "c1", ANCHOR,
+                      pair(URL_ALPHA, URL_BRAVO), 10) == "FILED"
+
+
+def test_the_funder_fixes_its_lists_once_and_they_are_public(pool):
+    """Both lists are written at funding, cannot be edited afterwards, and a
+    claimant can read them before deciding whether to file."""
+    vm, c = pool
+    for bad in ([], ["alpha.example.com"],
+                ["alpha.example.com", "alpha.example.com"],
+                ["alpha.example.com", "nohost"]):
+        with pytest.raises(Exception):
+            open_pool(vm, c, hosts=bad)
+    with pytest.raises(Exception):
+        open_pool(vm, c, hosts="alpha.example.com")
+    pid = open_pool(vm, c)
+    p = pool_state(vm, c, pid)
+    assert p["anchors"] == ANCHORS
+    assert p["hosts"] == HOSTS
+    file_claim(vm, c, pid, "c1", ANCHOR, pair(URL_ALPHA, URL_BRAVO), 10)
+    assert pool_state(vm, c, pid)["hosts"] == HOSTS
+
+
+def test_one_account_cannot_occupy_the_pool_by_itself(pool):
+    """The twelve slots exist for twelve claims, not for one address filing
+    twelve times. With one claim per anchor per account, a single address can
+    hold at most as many claims as the funder named anchors, whatever it does
+    with host pairs."""
+    vm, c = pool
+    pid = open_pool(vm, c)
+    urls = ["https://" + h + "/doc" for h in HOSTS]
+    pairs = [pair(urls[i], urls[j])
+             for i in range(len(HOSTS)) for j in range(i + 1, len(HOSTS))]
+    for i, anchor in enumerate(ANCHORS):
+        assert file_claim(vm, c, pid, "a%d" % i, anchor, pairs[i], 10) == "FILED"
+    assert len(pool_state(vm, c, pid)["claims"]) == len(ANCHORS)
+
+    before = full_snapshot(vm, c, pid, ["a0", "a1", "a2"])
+    for i in range(6):
+        with pytest.raises(Exception):
+            file_claim(vm, c, pid, "x%d" % i, ANCHORS[i % 3], pairs[3 + i], 10)
+    assert full_snapshot(vm, c, pid, ["a0", "a1", "a2"]) == before
+    assert len(pool_state(vm, c, pid)["claims"]) == len(ANCHORS)
+
+    # a second account on the same anchor is exactly what the pool is for
+    assert file_claim(vm, c, pid, "b0", ANCHOR, pairs[9], 10,
+                      sender=CLAIMANT_B) == "FILED"

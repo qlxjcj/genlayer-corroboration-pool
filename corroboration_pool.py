@@ -6,6 +6,8 @@ MAX_BRIEF = 400
 MAX_ANCHOR = 120
 MAX_ID = 32
 MAX_CLAIMS = 12
+MAX_ANCHORS = 4
+MAX_HOSTS = 10
 MIN_WINDOW = 1
 
 OPEN = "OPEN"
@@ -24,11 +26,10 @@ SPACE = " \t\r\n\f\v"
 class CorroborationPool(gl.Contract):
     """One fund, shared only by claims that two independent sources back.
 
-    A claim names an anchor and two sources. It earns a share only when the two
-    sources are from different hosts, the anchor literally appears in both, and
-    consensus agrees the two documents describe the same contribution. The fund
-    is split equally across corroborated claims after the claim set freezes, and
-    whatever the split cannot divide goes back to the funder. See README."""
+    The funder fixes the question and the venues: the anchors to corroborate
+    and the hosts trusted as independent places to look. A claim picks one
+    anchor and two sources from two different trusted hosts, and is paid only
+    when the anchor is in both and consensus agrees. See README."""
 
     pools: TreeMap[str, str]
     claims: TreeMap[str, str]
@@ -59,7 +60,6 @@ class CorroborationPool(gl.Contract):
         return True
 
     def _iso_to_epoch(self, s: str) -> int:
-        # Hand-rolled so every validator agrees, with no optional stdlib.
         s = s.strip()
         if len(s) < 19:
             return 0
@@ -87,7 +87,6 @@ class CorroborationPool(gl.Contract):
         return (era * 146097 + doe - 719468) * 86400 + hh * 3600 + mm * 60 + ss - offset
 
     def _now(self) -> int:
-        # gl.message exposes no clock; the ISO stamp lives on message_raw.
         raw = getattr(gl, "message_raw", None)
         d = None
         if raw is not None:
@@ -102,8 +101,7 @@ class CorroborationPool(gl.Contract):
         return self._iso_to_epoch(d if isinstance(d, str) else str(d))
 
     def _squash(self, text: str) -> str:
-        """lowercase with every blank removed, so an anchor survives being
-        wrapped across lines or padded with the odd space a renderer drops in."""
+        """lowercase, every blank removed: survives line wrap and stray padding."""
         out = []
         for ch in str(text).lower():
             if ch in SPACE:
@@ -112,8 +110,7 @@ class CorroborationPool(gl.Contract):
         return "".join(out)
 
     def _host(self, url: str) -> str:
-        """scheme://host/path -> host, lowercased and stripped of port and
-        userinfo. Two sources count as independent only when this differs."""
+        """scheme://host/path -> host, lowercased, no port or userinfo."""
         u = str(url).strip().lower()
         i = u.find("://")
         if i >= 0:
@@ -198,12 +195,7 @@ class CorroborationPool(gl.Contract):
         return s in self._squash(body_a) or s in self._squash(body_b)
 
     def _examine(self, urls: list, anchor: str) -> dict:
-        """Fetch both documents and decide whether they corroborate one claim.
-
-        The fetch lives inside the equivalence block alongside the model call,
-        so there is a single consensus point and no naked nondeterministic call.
-        The verdict is computed in code here, against the text just fetched, so
-        validators agree on the decision rather than on a leader's wording."""
+        """Fetch both documents; the verdict is computed in code, in the block."""
 
         def check() -> dict:
             bodies = []
@@ -224,16 +216,15 @@ class CorroborationPool(gl.Contract):
 
             task = (
                 "Two documents are offered as independent accounts of ONE contribution.\n"
-                "Decide only whether they are about the same thing. Do not judge quality.\n"
-                "Return the single span that names the contribution and that both share,\n"
-                "copied exactly from the first document it appears in. Use an empty string\n"
-                "when the documents are not about the same contribution.\n\n"
+                "Decide only whether they are about the same thing; do not judge quality.\n"
+                "Return the single span naming the contribution that both share, copied\n"
+                "exactly. Use an empty string when they are not about the same thing.\n\n"
                 "DOC A:\n" + body_a[:1100] + "\n\nDOC B:\n" + body_b[:1100] +
                 "\n\nANCHOR: " + anchor +
                 '\n\nJSON only: {"same": "true"|"false"|"unclear", "shared": "<span or empty>"}'
             )
-            # An answer the contract cannot use credits nothing: a claim that
-            # cannot be corroborated is never paid, and the pool still settles.
+            # An answer the contract cannot use credits nothing, and the pool
+            # still settles.
             parsed = None
             try:
                 raw = gl.nondet.exec_prompt(task)
@@ -263,16 +254,15 @@ class CorroborationPool(gl.Contract):
             return {"retrieved": True, "same": same, "shared": shared,
                     "ok": ok, "why": why}
 
-        principle = (
-            "Equivalent only if retrieved, ok and same all match exactly. "
-            "The shared span wording may differ, and empty stays empty."
-        )
+        principle = ("Equivalent only if retrieved, ok and same match exactly; "
+                     "shared wording may differ and empty stays empty.")
         return gl.eq_principle.prompt_comparative(check, principle)
 
     # ---------------- lifecycle ----------------
 
     @gl.public.write.payable
-    def open_pool(self, brief: str, claim_window: int) -> str:
+    def open_pool(self, brief: str, anchors: list, hosts: list, claim_window: int) -> str:
+        """Open a pool: the funder names the anchors to corroborate and the hosts."""
         funder = self._addr_hex(gl.message.sender_address)
         total = int(gl.message.value)
         if not brief or not brief.strip() or len(brief) > MAX_BRIEF:
@@ -281,9 +271,33 @@ class CorroborationPool(gl.Contract):
             raise gl.vm.UserError("Claim window must be > 0")
         if total <= 0:
             raise gl.vm.UserError("Pool must be > 0")
+
+        alist = []
+        if not isinstance(anchors, list) or not anchors or len(anchors) > MAX_ANCHORS:
+            raise gl.vm.UserError("Anchors must be 1..4")
+        for a in anchors:
+            s = str(a).strip()
+            if not s or len(s) > MAX_ANCHOR:
+                raise gl.vm.UserError("Anchors must be 1..120 chars")
+            if self._squash(s) in [self._squash(x) for x in alist]:
+                raise gl.vm.UserError("Anchors must be distinct")
+            alist.append(s)
+
+        hlist = []
+        if not isinstance(hosts, list) or len(hosts) < 2 or len(hosts) > MAX_HOSTS:
+            raise gl.vm.UserError("Hosts must be 2..10")
+        for h in hosts:
+            hs = self._host(str(h))
+            if not hs or "." not in hs:
+                raise gl.vm.UserError("Hosts must look like hostnames")
+            if hs in hlist:
+                raise gl.vm.UserError("Hosts must be distinct")
+            hlist.append(hs)
+
         pid = "p" + str(int(self.pool_count))
         self.pools[pid] = json.dumps({
             "pool_id": pid, "funder": funder, "total": total, "brief": brief.strip(),
+            "anchors": alist, "hosts": hlist,
             "claim_by": self._now() + int(claim_window), "status": OPEN,
             "claim_ids": "[]", "corroborated_count": 0, "share": 0,
             "remainder": 0, "paid_total": 0,
@@ -308,9 +322,17 @@ class CorroborationPool(gl.Contract):
         ids = self._claim_ids(p)
         if len(ids) >= MAX_CLAIMS:
             raise gl.vm.UserError("Too many claims")
-        a = str(anchor).strip()
-        if not a or len(a) > MAX_ANCHOR:
-            raise gl.vm.UserError("Anchor must be 1..120 chars")
+        # The claimant may not choose the question. The anchor is filed back in
+        # the funder's own wording, so two spellings cannot be two claims.
+        want = self._squash(anchor)
+        a = ""
+        for x in p["anchors"]:
+            if self._squash(str(x)) == want:
+                a = str(x)
+                break
+        if not a:
+            raise gl.vm.UserError("Anchor is not one the funder named")
+
         if not isinstance(sources, list) or len(sources) != 2:
             raise gl.vm.UserError("Exactly two sources are required")
         urls = []
@@ -323,15 +345,22 @@ class CorroborationPool(gl.Contract):
             raise gl.vm.UserError("Sources must differ")
         h0, h1 = self._host(urls[0]), self._host(urls[1])
         if not h0 or not h1 or h0 == h1:
-            # The same host twice is one source wearing two hats.
             raise gl.vm.UserError("Sources must be from different hosts")
+        # Nor the venue: a host the funder did not name may be the claimant's
+        # own, and its own two sites agreeing corroborate nothing.
+        permit = [str(v) for v in p["hosts"]]
+        if h0 not in permit or h1 not in permit:
+            raise gl.vm.UserError("Host is not one the funder trusts")
 
-        # Anti-collusion: no two claims in a pool may rest on the same pair of
-        # hosts, so one account cannot prop up several claims from one place.
+        # Anti-collusion both ways: one claim per anchor per account, so no
+        # single address can occupy the pool, and one host pair per pool.
+        me = self._addr_hex(gl.message.sender_address).lower()
         for other in ids:
             o = self._load_claim(pool_id, other)
             if str(o["status"]) == WITHDRAWN:
                 continue
+            if str(o["claimant"]).lower() == me and self._squash(str(o["anchor"])) == self._squash(a):
+                raise gl.vm.UserError("You already hold a claim on this anchor")
             oh = sorted([str(x) for x in o["hosts"]])
             if oh == sorted([h0, h1]):
                 raise gl.vm.UserError("That host pair already backs a claim")
@@ -347,7 +376,7 @@ class CorroborationPool(gl.Contract):
 
     @gl.public.write
     def withdraw(self, pool_id: str, claim_id: str) -> str:
-        """A claimant may stand down, but only before the set freezes."""
+        """A claimant may stand down before the freeze."""
         p = self._load_pool(pool_id)
         c = self._load_claim(pool_id, claim_id)
         if self._addr_hex(gl.message.sender_address).lower() != str(c["claimant"]).lower():
@@ -365,8 +394,7 @@ class CorroborationPool(gl.Contract):
 
     @gl.public.write
     def assess(self, pool_id: str, claim_id: str) -> str:
-        """Judge one claim. Only once the claim set is final, because the
-        anti-collusion rule cannot be applied to a set that can still grow."""
+        """Judge one claim, only once the claim set is final."""
         p = self._load_pool(pool_id)
         c = self._load_claim(pool_id, claim_id)
         if str(p["status"]) not in (OPEN, FROZEN):
@@ -388,8 +416,7 @@ class CorroborationPool(gl.Contract):
 
     @gl.public.write
     def allocate(self, pool_id: str) -> str:
-        """Split the fund. No model call here at all: this is pure arithmetic
-        over the frozen, already-assessed claim set."""
+        """Split the fund: pure arithmetic over the frozen, assessed set."""
         p = self._load_pool(pool_id)
         if str(p["status"]) not in (OPEN, FROZEN):
             raise gl.vm.UserError("Pool is " + str(p["status"]))
@@ -450,9 +477,9 @@ class CorroborationPool(gl.Contract):
     @gl.public.view
     def get_pool(self, pool_id: str) -> str:
         p = self._load_pool(pool_id)
-        out = {k: p[k] for k in ("pool_id", "funder", "total", "brief", "claim_by",
-                                 "status", "corroborated_count", "share",
-                                 "remainder", "paid_total")}
+        out = {k: p[k] for k in ("pool_id", "funder", "total", "brief", "anchors",
+                                 "hosts", "claim_by", "status", "corroborated_count",
+                                 "share", "remainder", "paid_total")}
         out["claims"] = [{"claim_id": cid,
                           "status": str(self._load_claim(pool_id, cid)["status"]),
                           "claimant": str(self._load_claim(pool_id, cid)["claimant"])}

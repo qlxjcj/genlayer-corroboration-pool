@@ -40,6 +40,17 @@ BRIEF = "Reward the SHARD-7 cache work that cut p95 latency."
 
 ANCHOR = "SHARD-7"
 ANCHOR_OTHER = "QUOTA-2"
+ANCHOR_THIRD = "LATENCY-9"
+
+# The funder fixes the question and the venues at funding time. A claimant may
+# only pick inside these two lists.
+ANCHORS = [ANCHOR, ANCHOR_OTHER, ANCHOR_THIRD]
+HOSTS = ["alpha.example.com", "bravo.example.com", "charlie.example.com",
+         "delta.example.com", "echo.example.com", "foxtrot.example.com",
+         "golf.example.com", "hotel.example.com",
+         "empty.example.com", "error.example.com"]
+# A host the funder did not name, and one a claimant could plausibly control.
+HOST_UNTRUSTED = "claimant-own.example.net"
 
 # --- evidence documents. The report token is what the model mock keys on, and
 # no token is a substring of another so first-match-wins cannot bleed one
@@ -71,6 +82,8 @@ URL_FTP = "ftp://alpha.example.com/doc"
 # Same host as URL_ALPHA once scheme, port, path and userinfo are stripped.
 URL_ALPHA_PORT = "https://alpha.example.com:8443/deep/path?x=1"
 URL_ALPHA_USER = "https://user:secret@alpha.example.com/doc"
+# A venue the funder never named.
+URL_UNTRUSTED = "https://" + HOST_UNTRUSTED + "/doc"
 
 
 def iso(offset: int) -> str:
@@ -151,12 +164,19 @@ def pool(direct_vm, direct_deploy):
     return vm, c
 
 
-def open_pool(vm, c, window=100, total=POOL, brief=BRIEF, sender=FUNDER, value=None):
+def open_pool(vm, c, window=100, total=POOL, brief=BRIEF, sender=FUNDER, value=None,
+              anchors=None, hosts=None):
     vm.warp(iso(0))
     vm.sender = sender
     vm.value = value if value is not None else total
-    pid = c.open_pool(brief, window)
-    vm.value = 0
+    # `is None` rather than `or`: an empty list must reach the contract and be
+    # refused, not be quietly replaced by the default.
+    try:
+        pid = c.open_pool(brief, ANCHORS if anchors is None else anchors,
+                          HOSTS if hosts is None else hosts, window)
+    finally:
+        # A refused call must not leave the next call looking payable.
+        vm.value = 0
     return pid
 
 
