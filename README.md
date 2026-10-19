@@ -291,11 +291,42 @@ exactly what the pool is for.
 
 ### The freeze, the judgement, the split
 
-The freeze boundary was checked on the live contract before and after `claim_by`:
-`assess` while the window was still open came back
-`Claim window is still open`, and a well-formed claim filed after it closed came
-back `Claim window has closed`. Two `assess` calls and one `allocate` are running;
-the final books are appended here when they land.
+The freeze boundary was checked on the live contract on both sides of `claim_by`:
+`assess` while the window was still open came back `Claim window is still open`,
+and a well-formed claim filed after it closed came back `Claim window has closed`.
+
+Then both claims were judged and the pool was split. Nothing here was chosen by a
+human — the harness only sent the transactions:
+
+```
+c1  CORROBORATED  claimant 0x347e…b363
+    hosts   raw.githubusercontent.com + cdn.jsdelivr.net
+    same    true     shared "SHARD-7 cache"
+    reason  two independent sources carry the anchor and agree
+
+c2  CORROBORATED  claimant 0x6F33…8959
+    hosts   raw.githack.com + cdn.statically.io
+    same    true     shared "SHARD-7 cache"
+    reason  two independent sources carry the anchor and agree
+
+status              SETTLED
+total               1000000000000000000
+corroborated_count  2
+share               500000000000000000
+remainder           0
+paid_total          1000000000000000000
+paid + remainder    1000000000000000000   == total: true
+```
+
+Both claims found the **same span**, `SHARD-7 cache`, quoted out of two different
+documents each. Compare it with `fixtures/report-a.txt` and
+`fixtures/report-b.txt`: the phrase is there verbatim, in both, and the contract
+checked that before the model's answer was allowed to count for anything. A model
+could not have invented it and could not have credited a claim without it.
+
+Neither claimant could have reached this state by choosing its own evidence: the
+anchor and both hosts were fixed by the funder at `open_pool`, and the two
+refused filings above show what happens to anything outside that list.
 
 Check it yourself with `genlayer call <address> get_pool '"p1"'`. Note that
 `10^18` is not exactly representable as a JavaScript `Number`, so read the raw
