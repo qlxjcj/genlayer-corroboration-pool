@@ -246,44 +246,58 @@ python -m pytest tests/direct -q        # 53 passed
 
 ## Live on chain
 
-Two evidence documents are served from this repository over two independent
-CDNs, and a third copy lives on an independent gist, so three genuinely different
-hosts are in play. The `SHARD-7` anchor is in both documents.
+`fixtures/report-a.txt` and `fixtures/report-b.txt` are served from this repository
+over **four independent hosts** — `raw.githubusercontent.com`, `cdn.jsdelivr.net`,
+`raw.githack.com` and `cdn.statically.io` — so four genuinely different hostnames
+are in play, and the model is shown two *different* documents, not one document
+mirrored. Both documents carry the `SHARD-7` anchor.
 
-`open_pool` with 1 GEN, `anchors = ["SHARD-7", "QUOTA-2", "LATENCY-9"]` and
-`hosts = ["raw.githubusercontent.com", "cdn.jsdelivr.net", "gist.githubusercontent.com"]`,
-then the adversarial filings, then two real ones, then the freeze, two `assess`
-calls and one `allocate`.
+`p1` was opened with 1 GEN, `anchors = ["SHARD-7", "QUOTA-2", "LATENCY-9"]` and
+`hosts = ["raw.githubusercontent.com", "cdn.jsdelivr.net", "raw.githack.com",
+"cdn.statically.io"]`, `claim_window = 900`.
 
-**Refused, on chain, exactly as the tests say.** The claimant's own anchor and
-its own host:
+### Refused — the claimant tries to frame its own question
 
-```
-file_claim(p0, "evil", "MY-OWN-ANCHOR", [raw, cdn])      -> transaction reverted
-file_claim(p0, "evil", "SHARD-7", [attacker.example.com, raw]) -> reverted
-file_claim(p0, "evil", "SHARD-7", [raw, raw-again])      -> reverted
-get_pool(p0).claims                                      -> []   (nothing consumed)
-```
+Read straight off the live contract with `simulateWriteContract`, so no slot is
+spent proving a point:
 
-**Accepted**, and the pool split:
+| attempt | the contract says |
+|---|---|
+| anchor `MY-OWN-ANCHOR` | `Anchor is not one the funder named` |
+| anchor `shard-8` | `Anchor is not one the funder named` |
+| anchor `""` | `Anchor is not one the funder named` |
+| host `attacker.example.com` | `Host is not one the funder trusts` |
+| host `raw.githubusercontent.com` twice | `Sources must be from different hosts` |
 
-```
-status              SETTLED
-total               1000000000000000000
-corroborated_count  2
-share               500000000000000000
-remainder           0
-paid_total          1000000000000000000
+`get_pool(p1).claims` is `[]` after every one of them. Then the same thing **for
+real**: `file_claim(p1, "evil6", "MY-OWN-ANCHOR", ...)` came back
+`FINISHED_WITH_ERROR` and `claims` was still `[]`. A refusal costs the pool
+nothing.
 
-c1  CORROBORATED | raw.githubusercontent.com + cdn.jsdelivr.net
-c2  CORROBORATED | raw.githubusercontent.com + gist.githubusercontent.com
-```
+### Accepted — and what the contract stores
 
-Every claim's shared span was copied character for character out of the documents
-the contract fetched; compare them against `fixtures/` and the gist and see that
-a model could not have invented them.
+| claim | sender | anchor given | anchor stored | the two hosts |
+|---|---|---|---|---|
+| `c1` | `0x347e…b363` | `" shard-7 "` | **`"SHARD-7"`** | raw.githubusercontent.com + cdn.jsdelivr.net |
+| `occ` | `0x347e…b363`, same anchor again | — | — | `FINISHED_WITH_ERROR` |
+| `c2` | `0x6F33…8959` (a different account) | `SHARD-7` | `SHARD-7` | raw.githack.com + cdn.statically.io |
 
-Check it yourself with `genlayer call <address> get_pool '"p0"'`. Note that
+`c1` is the point of the anchor check: a lowercase, space-padded spelling is
+accepted and **stored in the funder's wording**, so it cannot later be spelled a
+second way into a second claim. `occ` is the point of the occupancy rule: one
+account cannot hold two claims on one anchor. `c2` is the point of *not*
+over-doing it — a second account on the same anchor still gets in, because that is
+exactly what the pool is for.
+
+### The freeze, the judgement, the split
+
+The freeze boundary was checked on the live contract before and after `claim_by`:
+`assess` while the window was still open came back
+`Claim window is still open`, and a well-formed claim filed after it closed came
+back `Claim window has closed`. Two `assess` calls and one `allocate` are running;
+the final books are appended here when they land.
+
+Check it yourself with `genlayer call <address> get_pool '"p1"'`. Note that
 `10^18` is not exactly representable as a JavaScript `Number`, so read the raw
 JSON string and compare with `BigInt`, not with `JSON.parse`.
 
